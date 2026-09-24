@@ -23,42 +23,91 @@ app.set("trust proxy", 1);
 app.use(helmet());
 
 const allowedOrigins = process.env.CORS_ORIGIN
-  ? process.env.CORS_ORIGIN.split(",").map((origin) => origin.trim())
+  ? process.env.CORS_ORIGIN.split(",").map((origin) => origin.trim()).filter(Boolean)
   : true;
 
 app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
-// Protect API routes from excessive requests.
-app.use(
-  "/api",
-  rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 200,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: {
-      success: false,
-      message: "Too many requests. Please try again later.",
-    },
-  })
-);
+const apiRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Too many requests. Please try again later.",
+  },
+});
 
-// Health check for local testing and deployment monitoring.
-app.get("/health", (_req, res) => {
-  res.status(200).json({
-    success: true,
-    service: "library-management-system-api",
-    database:
-      mongoose.connection.readyState === 1 ? "connected" : "disconnected",
-    timestamp: new Date().toISOString(),
-  });
+app.use("/api", apiRateLimiter);
+
+let connectionPromise = null;
+
+const connectDatabase = async () => {
+  if (mongoose.connection.readyState === 1) {
+    return;
+  }
+
+  if (!connectionPromise) {
+    connectionPromise = mongoose
+      .connect(MONGODB_URI, {
+        serverSelectionTimeoutMS: 10000,
+        maxPoolSize: 5,
+        minPoolSize: 0,
+        maxIdleTimeMS: 30000,
+      })
+      .then(() => {
+        console.log("MongoDB connected successfully.");
+      })
+      .catch((error) => {
+        connectionPromise = null;
+        throw error;
+      });
+  }
+
+  await connectionPromise;
+};
+
+// Health check reports the real database state and attempts to establish
+// a connection in serverless environments when necessary.
+app.get("/health", async (_req, res) => {
+  try {
+    await connectDatabase();
+
+    return res.status(200).json({
+      success: true,
+      service: "library-management-system-api",
+      database: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Health check database connection failed:", error);
+
+    return res.status(503).json({
+      success: false,
+      service: "library-management-system-api",
+      database: "disconnected",
+      timestamp: new Date().toISOString(),
+      message: "Database connection unavailable.",
+    });
+  }
+});
+
+// Vercel imports the Express application without running startServer(),
+// so API requests must initialize/reuse the MongoDB connection explicitly.
+app.use("/api", async (_req, _res, next) => {
+  try {
+    await connectDatabase();
+    next();
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.use("/api/books", bookRoutes);
 
-// Unknown route handler.
 app.use((_req, res) => {
   res.status(404).json({
     success: false,
@@ -66,7 +115,6 @@ app.use((_req, res) => {
   });
 });
 
-// Centralized error handler.
 app.use((err, _req, res, _next) => {
   console.error(err);
 
@@ -85,19 +133,11 @@ app.use((err, _req, res, _next) => {
     });
   }
 
-  res.status(err.statusCode || 500).json({
+  return res.status(err.statusCode || 500).json({
     success: false,
     message: err.message || "Internal server error.",
   });
 });
-
-const connectDatabase = async () => {
-  await mongoose.connect(MONGODB_URI, {
-    serverSelectionTimeoutMS: 10000,
-  });
-
-  console.log("MongoDB connected successfully.");
-};
 
 const startServer = async () => {
   await connectDatabase();
@@ -107,8 +147,6 @@ const startServer = async () => {
   });
 };
 
-// Local execution starts the HTTP server.
-// Vercel imports the exported Express app directly.
 if (require.main === module) {
   startServer().catch((error) => {
     console.error("Failed to start server:", error);

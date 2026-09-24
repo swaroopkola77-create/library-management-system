@@ -1,0 +1,12 @@
+const express=require("express");
+const mongoose=require("mongoose");
+const c=require("../controllers/bookController");
+const router=express.Router();
+const validateId=(req,res,next)=>{if(!mongoose.isValidObjectId(req.params.id))return res.status(400).json({success:false,message:"Invalid book ID"});next();};
+router.get("/",c.getBooks);
+router.post("/",c.createBook);
+router.get("/:id",validateId,c.getBookById);
+router.patch("/:id",validateId,c.updateBook);
+router.delete("/:id",validateId,c.deleteBook);
+router.patch("/:id/availability",validateId,c.updateAvailability);
+module.exports=router;
